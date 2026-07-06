@@ -1,0 +1,27 @@
+# Le script ecrit son etat, ses journaux et ses rapports HORS du depot
+# (/var/lib/init-defense-reseau, /root/Rapports-DefenseReseau, $TMPDIR en
+# simulation). Ces motifs ne sont la que par securite, au cas ou un test
+# serait lance depuis ce dossier.
+
+# Rapports et guides generes
+Rapports-DefenseReseau/
+rapport_*.html
+inventaire_*.txt
+guide-opnsense.md
+guide-bastion-utilisateurs.md
+
+# Journaux et etat local
+*.log
+init-defense-reseau*/
+manifeste.tsv
+journal.log
+audit.tsv
+zerotrust.tsv
+
+# Fichiers de configuration reels (peuvent contenir des specifques a un site)
+config.local.conf
+
+# Divers OS/editeurs
+.DS_Store
+*.swp
+*~

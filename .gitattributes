@@ -1,0 +1,15 @@
+# Normalisation des fins de ligne pour un depot multi-plateforme.
+# Par defaut : normalise en LF dans le depot, restitue selon la plateforme.
+* text=auto
+
+# Les scripts shell et fichiers de config DOIVENT rester en LF (execution Linux).
+# Sans cela, un shebang suivi d'un CRLF donne l'erreur "/bin/bash^M: bad interpreter".
+*.sh   text eol=lf
+*.conf text eol=lf
+
+# Documentation : LF.
+*.md   text eol=lf
+
+# Fichiers binaires (jamais alteres).
+*.png  binary
+*.pdf  binary
