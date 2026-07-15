@@ -12,9 +12,8 @@
 #      d'hygiene inspire des referentiels ANSSI.
 #
 #  DESCRIPTION
-#      Pendant Linux du script Init-WindowsServer.ps1 : meme philosophie.
-#        - Interactif par menus, avec volet PEDAGOGIQUE avant chaque action
-#          (comprendre les moyens de defense et savoir choisir les equipements).
+#      Outil operationnel de mise en place de la defense reseau :
+#        - Interactif par menus ; volet pedagogique optionnel (--pedago) masque par defaut.
 #        - Idempotent : les fichiers modifies sont sauvegardes, les objets
 #          crees sont traces dans un manifeste, le script est relancable.
 #        - Mode simulation (--dry-run) : montre ce qui serait fait, sans agir.
@@ -2545,7 +2544,7 @@ main_menu() {
                 if ! is_done "rapport" && ask_yn "Generer le rapport HTML avant de quitter ?" "o"; then
                     module_report
                 fi
-                say "  Au revoir ! (et si ce script vous a sauve la vie... payez une biere a l'equipe !)"
+                say "  Termine. Consultez les journaux et le rapport genere."
                 break
                 ;;
             *) err "Choix invalide." ;;
@@ -2653,3 +2652,4 @@ main() {
 }
 
 main "$@"
+                                                                                                     
