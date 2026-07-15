@@ -1,21 +1,26 @@
 # Init-DefenseReseau
 
-Pendant **Linux** d'`Init-WindowsServer.ps1` : script Bash **interactif** de mise en
-place de la défense réseau d'un environnement Debian/Ubuntu, construit sur le même
-modèle (menus, mode simulation, mode non-interactif par fichier de configuration,
-journalisation, manifeste des objets créés, rapport final, réinitialisation « biere »),
-avec un volet **pédagogique** avant chaque action.
+Script Bash **interactif** de mise en place de la défense réseau d'un environnement
+Debian/Ubuntu : pare-feu à zones/DMZ, IDS/IPS, proxy, reverse proxy, bastion SSH,
+moindre privilège et audit d'hygiène — avec menus, mode simulation, mode
+non-interactif par fichier de configuration, journalisation, manifeste des objets
+créés, rapport HTML et réinitialisation « biere ».
+
+**Outil opérationnel par défaut** : il applique directement les mesures, sans pavés
+explicatifs. Le volet pédagogique (méthode, schémas, référentiels ANSSI, fiches de
+concepts) est masqué et ne s'affiche qu'avec l'option **`--pedago`** — rien n'est
+retiré, tout reste accessible à la demande.
 
 ## Objectifs couverts
 
 | # | Module | Objectif |
 |---|---|---|
-| 1 | Concepts | Connaître les moyens de défense, savoir **choisir les équipements** (panorama + assistant de choix), défense en profondeur, référentiels ANSSI |
+| 1 | Architecture | **Assistant de choix des équipements** (5 questions → recommandation d'architecture adaptée). Les fiches de concepts (défense en profondeur, panorama, référentiels ANSSI) s'ajoutent avec `--pedago` |
 | 2 | Zero Trust | Maîtriser le modèle **NIST SP 800-207** : les 7 principes, évaluation de maturité interactive (14 questions), puis **plan d'action opérationnel applicable** : inventaire local généré, mises à jour automatiques, journalisation d'audit, lancement direct des modules 3/4/7 — chaque action au choix |
-| 3 | Pare-feu | Configurer **nftables ou iptables** : politique par défaut DROP, zones **WAN/LAN/DMZ**, NAT, publication de services en DMZ, anti-verrouillage (rollback 60 s) + **guide OPNsense** généré |
+| 3 | Pare-feu | Configurer **nftables ou iptables** : politique par défaut DROP, zones **WAN/LAN/DMZ**, NAT, publication de services en DMZ, anti-verrouillage (rollback 60 s) + **guide OPNsense** généré. En mode iptables, un **socle IPv6 (ip6tables)** est aussi appliqué et persisté (`rules.v6`) pour ne pas laisser l'IPv6 ouvert |
 | 4 | IDS/IPS | Déployer **Snort** (apprentissage) ou **Suricata** (production) : écriture de règles locales commentées, **tuning** (threshold/suppress), **threat intel** (ET Open via suricata-update), passage IPS optionnel |
 | 5 | Proxy | **Squid** en filtrage sortant : ACL, liste noire de domaines, `deny all` final, journalisation |
-| 6 | Reverse proxy | **Nginx ou HAProxy** : terminaison TLS, en-têtes de sécurité (HSTS, X-Frame-Options...), contrôle de santé des backends |
+| 6 | Reverse proxy | **Nginx ou HAProxy** : terminaison TLS, en-têtes de sécurité (HSTS, X-Frame-Options...), contrôle de santé des backends. Certificat au choix : **existant (PKI interne)**, **Let's Encrypt** (certbot, Nginx, renouvellement auto) ou auto-signé de lab |
 | 7 | Bastion SSH | Durcissement sshd selon le guide **ANSSI (Open)SSH** : clés uniquement, `AllowGroups`, algorithmes récents, bannière légale, **fail2ban**, guide ProxyJump généré |
 | 8 | Moindre privilège | Audit sudoers, délégation sudo **granulaire** (validée par `visudo -cf`), umask 027, pwquality, désactivation des services inutiles |
 | 9 | Audit | Vérifications inspirées du Guide d'hygiène informatique de l'ANSSI avec score, puis **corrections à la carte** : chaque point non conforme est proposé individuellement (appliquer ou ignorer) — MAJ, sysctl persistés, permissions, verrouillage de comptes, rsyslog/auditd/fail2ban... |
@@ -38,6 +43,9 @@ sudo ./Init-DefenseReseau.sh
 
 # Simulation : montre ce qui serait fait, sans rien modifier (root non requis)
 ./Init-DefenseReseau.sh --dry-run
+
+# Avec les explications pédagogiques (méthode, schémas, référentiels ANSSI)
+sudo ./Init-DefenseReseau.sh --pedago
 
 # Non-interactif, piloté par un fichier de configuration
 sudo ./Init-DefenseReseau.sh --unattended --config config.sample.conf
@@ -64,6 +72,13 @@ sudo ./Init-DefenseReseau.sh --reset
 - **Idempotence** : chaque fichier modifié est sauvegardé horodaté dans
   `/var/lib/init-defense-reseau/sauvegardes/`, chaque objet créé est tracé dans
   le manifeste ; le script est relançable sans doublon.
+- **IPv6** : nftables filtre nativement IPv4 **et** IPv6 (table `inet`) ; en mode
+  iptables, un socle ip6tables protège aussi l'INPUT IPv6 (couvert par le même
+  rollback anti-verrouillage).
+- **fail2ban** : la prison SSH utilise `backend = systemd`, indispensable sur les
+  distributions récentes (Ubuntu 24.04…) où `/var/log/auth.log` n'existe plus.
+- **Entrées validées** : les ports SSH sont vérifiés (entier 1-65535) et les
+  fichiers temporaires sont supprimés même en cas d'interruption (Ctrl-C).
 
 ## État, journaux et rapport
 
@@ -85,11 +100,11 @@ séparées. Refusée en mode `--unattended`.
 
 ## Avertissements
 
-> ⚠️ Outil conçu pour des **labs, maquettes et petits environnements**, dans une
-> démarche d'apprentissage. Testez en maquette avant toute production : un pare-feu
-> en politique DROP, un sshd durci ou un proxy obligatoire peuvent couper des usages
-> existants. Les certificats générés (reverse proxy) sont **auto-signés** : en
-> production, utilisez une PKI ou Let's Encrypt.
+> ⚠️ Testez en maquette avant toute production : un pare-feu en politique DROP, un
+> sshd durci ou un proxy obligatoire peuvent couper des usages existants (des
+> garde-fous anti-verrouillage sont intégrés, mais rien ne remplace un test). Pour
+> le reverse proxy, préférez en production un **certificat de PKI interne ou
+> Let's Encrypt** (proposés par le module 6) plutôt que l'auto-signé de lab.
 
 ## Références
 

@@ -54,7 +54,7 @@
 #      sudo ./Init-DefenseReseau.sh --reset         # reinitialisation 'biere'
 #
 #  NOTES
-#      Version : 1.0.0
+#      Version : 1.1.0
 #      Cible   : Debian 11/12, Ubuntu 22.04/24.04 (paquets via apt)
 #      Etat    : /var/lib/init-defense-reseau/ (journal, manifeste, sauvegardes)
 #      Licence : MIT
@@ -71,13 +71,14 @@ set -o pipefail
 # REGION 0 : CONSTANTES
 #===============================================================================
 SCRIPT_NAME="Init-DefenseReseau"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 RESET_KEYWORD="biere"          # mot de passe symbolique du reset (sensible a la casse)
 
 DRY_RUN=0
 UNATTENDED=0
 NO_COLOR=0
 DO_RESET=0
+PEDAGO=0            # 0 = outil operationnel (defaut) ; 1 = affiche les explications (--pedago)
 CONFIG_FILE=""
 
 # Repertoires d'etat (redefinis pour un dry-run non root : voir init_dirs)
@@ -94,6 +95,18 @@ LOG_FILE=""
 REPORT_DIR_DEFAULT="/root/Rapports-DefenseReseau"
 
 declare -A BACKED_UP=()   # fichiers deja sauvegardes durant cette session
+
+# --- Nettoyage des fichiers temporaires (meme sur Ctrl-C / kill) ---
+# Tous les fichiers temporaires sont crees dans TMP_ROOT (initialise par init_dirs).
+# On supprime le repertoire entier : robuste meme si new_tmp est appele en
+# substitution de commande $( ) (sous-shell), cas ou un tableau serait perdu.
+TMP_ROOT=""
+new_tmp() {
+    if [[ -n "$TMP_ROOT" ]]; then mktemp -p "$TMP_ROOT"; else mktemp; fi
+}
+cleanup_tmp() { [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]] && rm -rf "$TMP_ROOT" 2>/dev/null; return 0; }
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT TERM
 
 #===============================================================================
 # REGION 1 : AFFICHAGE, SAISIE, JOURNALISATION
@@ -137,6 +150,13 @@ pause() {
     read -r _
 }
 
+# teach : n'affiche le contenu (heredoc) qu'en mode pedagogique (--pedago).
+# Consomme toujours stdin pour ne pas casser le flux du heredoc.
+teach() { if [[ $PEDAGO -eq 1 ]]; then cat; else cat >/dev/null; fi; }
+
+# pause_teach : ne s'arrete qu'en mode pedagogique (evite les pauses inutiles en operationnel).
+pause_teach() { [[ $PEDAGO -eq 1 ]] && pause; return 0; }
+
 # ask_yn "Question" "o|n" -> code retour 0 = oui, 1 = non
 ask_yn() {
     local question="$1" def="${2:-n}" r
@@ -167,6 +187,20 @@ ask_val() {
     printf '%s' "${C_BLD}$prompt${C_OFF} [${def}] : " >&2
     read -r r
     printf '%s' "${r:-$def}"
+}
+
+# valid_port 22 -> 0 si entier 1..65535
+valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+
+# ask_port "Invite" "defaut" -> echo un port valide (re-demande si invalide)
+ask_port() {
+    local prompt="$1" def="$2" p
+    while true; do
+        p=$(ask_val "$prompt" "$def")
+        if valid_port "$p"; then printf '%s' "$p"; return 0; fi
+        err "Port invalide (attendu : entier 1-65535) : '$p'"
+        [[ $UNATTENDED -eq 1 ]] && { printf '%s' "$def"; return 0; }
+    done
 }
 
 # ask_choice "Invite" "opt1" "opt2" ... -> echo le numero (1..n)
@@ -210,6 +244,8 @@ init_dirs() {
     touch "$MANIFEST" "$JOURNAL" "$DONE_LIST"
     LOG_FILE="$LOG_DIR/session_$(date '+%Y%m%d_%H%M%S').log"
     : > "$LOG_FILE"
+    # Repertoire des fichiers temporaires (nettoye par cleanup_tmp au trap EXIT/INT/TERM)
+    TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/init-defres.XXXXXX" 2>/dev/null) || TMP_ROOT=""
 }
 
 require_root() {
@@ -455,7 +491,16 @@ TXT
 }
 
 module_concepts() {
-    title "MODULE 1 : Moyens de defense et choix des equipements"
+    title "MODULE 1 : Choix des equipements de securite"
+    # Mode operationnel (defaut) : uniquement l'assistant d'architecture (actionnable).
+    # Les fiches explicatives (defense en profondeur, panorama, referentiels) ne
+    # s'affichent qu'avec --pedago.
+    if [[ $PEDAGO -eq 0 ]]; then
+        concepts_assistant
+        mark_done "concepts"
+        journal "Module 1 : assistant d'architecture"
+        return 0
+    fi
     local c
     while true; do
         c=$(ask_choice "Que souhaitez-vous consulter ?" \
@@ -568,7 +613,7 @@ zt_inventory() {
 
 module_zerotrust() {
     title "MODULE 2 : Zero Trust - NIST SP 800-207"
-    cat <<'TXT'
+    teach <<'TXT'
   Le Zero Trust part d'un constat : la confiance implicite accordee au reseau
   interne ("je suis dans le LAN donc j'ai le droit") est la faille exploitee
   par la majorite des attaques modernes (mouvement lateral apres une premiere
@@ -589,7 +634,7 @@ module_zerotrust() {
   Application operationnelle : c'est une DEMARCHE progressive, pas un produit.
   L'evaluation suivante situe votre maturite sur chaque principe.
 TXT
-    pause
+    pause_teach
     if ! ask_yn "Lancer l'evaluation de maturite Zero Trust (14 questions) ?" "o"; then
         return 0
     fi
@@ -684,7 +729,7 @@ TXT
 #===============================================================================
 
 fw_pedagogie() {
-    cat <<'TXT'
+    teach <<'TXT'
   METHODE (guide ANSSI "politique de filtrage d'un pare-feu") :
     1. politique par defaut : TOUT INTERDIRE (policy drop) ;
     2. matrice de flux : lister les flux LEGITIMES (qui -> quoi, quel port) ;
@@ -853,20 +898,59 @@ fw_generate_iptables() {
     } > "$out"
 }
 
+fw_generate_ip6tables() {
+    # $1=mode ; socle IPv6 protecteur (format ip6tables-restore) dans $2.
+    # Objectif : ne pas laisser l'INPUT IPv6 ouvert quand on choisit iptables.
+    # On garde ICMPv6 (indispensable a IPv6) et le port SSH (anti-verrouillage).
+    local mode="$1" out="$2"
+    {
+        printf '# Genere par %s v%s le %s (IPv6, format ip6tables-restore)\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$(date '+%F %T')"
+        printf '*filter\n'
+        if [[ "$mode" == "routeur" ]]; then
+            # FORWARD laisse a ACCEPT : filtrer le routage IPv6 sans le tester couperait
+            # la connectivite v6 du LAN. On protege l'hote (INPUT) et on avertit.
+            printf ':INPUT DROP [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n'
+        else
+            printf ':INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n'
+        fi
+        printf -- '-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n'
+        printf -- '-A INPUT -m conntrack --ctstate INVALID -j DROP\n'
+        printf -- '-A INPUT -i lo -j ACCEPT\n'
+        printf -- '-A INPUT -p ipv6-icmp -j ACCEPT\n'
+        printf -- '-A INPUT -p tcp --dport %s -m conntrack --ctstate NEW -m limit --limit 6/minute -j ACCEPT\n' "$FW_SSH_PORT"
+        if [[ "$mode" == "hote" ]]; then
+            local p
+            for p in $FW_EXTRA_TCP; do printf -- '-A INPUT -p tcp --dport %s -j ACCEPT\n' "$p"; done
+            for p in $FW_EXTRA_UDP; do printf -- '-A INPUT -p udp --dport %s -j ACCEPT\n' "$p"; done
+        fi
+        printf -- '-A INPUT -m limit --limit 5/minute -j LOG --log-prefix "[FW6-ENTREE-REJET] "\n'
+        printf 'COMMIT\n'
+    } > "$out"
+}
+
 fw_apply_with_rollback() {
-    # $1=moteur (nft|iptables) $2=fichier de regles genere
-    local engine="$1" rules="$2" sav ans
+    # $1=moteur (nft|iptables) $2=fichier de regles IPv4/inet $3=(optionnel) fichier ip6tables
+    local engine="$1" rules="$2" v6rules="${3:-}" sav sav6="" ans
     if [[ $DRY_RUN -eq 1 ]]; then
         say "${C_CYA}  [SIMULATION]${C_OFF} Application du jeu de regles $engine (avec rollback 60 s)."
         return 0
     fi
-    sav=$(mktemp)
+    sav=$(new_tmp)
     if [[ "$engine" == "nft" ]]; then
+        # La table 'inet' couvre IPv4 ET IPv6 : rien de separe a faire.
         nft list ruleset > "$sav" 2>/dev/null
-        if ! run_cmd "Application du jeu de regles nftables" nft -f "$rules"; then rm -f "$sav"; return 1; fi
+        if ! run_cmd "Application du jeu de regles nftables" nft -f "$rules"; then return 1; fi
     else
         iptables-save > "$sav" 2>/dev/null
-        if ! run_cmd "Application du jeu de regles iptables" iptables-restore "$rules"; then rm -f "$sav"; return 1; fi
+        if ! run_cmd "Application du jeu de regles iptables (IPv4)" iptables-restore "$rules"; then return 1; fi
+        # IPv6 : sans regles ip6tables, l'INPUT IPv6 reste grand ouvert (politique ACCEPT
+        # par defaut). On applique un socle protecteur, restaurable par le meme rollback.
+        if [[ -n "$v6rules" ]] && command -v ip6tables >/dev/null 2>&1; then
+            sav6=$(new_tmp)
+            ip6tables-save > "$sav6" 2>/dev/null
+            run_cmd "Application du jeu de regles ip6tables (IPv6)" ip6tables-restore "$v6rules" \
+                || warn "Application IPv6 en echec : verifiez ip6tables (protection IPv6 non garantie)."
+        fi
     fi
     warn "ANTI-VERROUILLAGE : verifiez MAINTENANT que votre acces (SSH...) fonctionne."
     printf '%s' "${C_BLD}  Conserver ces regles ? Tapez 'o' sous 60 s, sinon RESTAURATION automatique : ${C_OFF}"
@@ -875,7 +959,7 @@ fw_apply_with_rollback() {
     if [[ "$ans" =~ ^[oO]$ ]]; then
         ok "Regles confirmees et conservees."
         journal "Pare-feu : nouvelles regles $engine confirmees"
-        rm -f "$sav"
+        rm -f "$sav" "$sav6"
         return 0
     fi
     warn "Pas de confirmation : restauration de l'ancien jeu de regles..."
@@ -884,9 +968,10 @@ fw_apply_with_rollback() {
         nft -f "$sav" 2>>"$LOG_FILE" || warn "Ruleset precedent vide : pare-feu remis a zero (tout ouvert)."
     else
         iptables-restore "$sav" 2>>"$LOG_FILE"
+        [[ -n "$sav6" ]] && ip6tables-restore "$sav6" 2>>"$LOG_FILE"
     fi
     journal "Pare-feu : regles $engine annulees (anti-verrouillage)"
-    rm -f "$sav"
+    rm -f "$sav" "$sav6"
     return 1
 }
 
@@ -965,7 +1050,7 @@ GUIDE
 module_firewall() {
     title "MODULE 3 : Pare-feu a zones (nftables / iptables) avec DMZ"
     fw_pedagogie
-    pause
+    pause_teach
 
     local engine mode c
     c=$(ask_choice "Quel moteur de filtrage ?" \
@@ -985,7 +1070,7 @@ module_firewall() {
         "Routeur pare-feu 3 zones : WAN / LAN / DMZ (routage + NAT + DMZ)")
     [[ "$c" == "1" ]] && mode="hote" || mode="routeur"
 
-    FW_SSH_PORT=$(ask_val "Port SSH a conserver ouvert (anti-verrouillage)" "${CFG_FW_SSH_PORT:-22}")
+    FW_SSH_PORT=$(ask_port "Port SSH a conserver ouvert (anti-verrouillage)" "${CFG_FW_SSH_PORT:-22}")
     FW_EXTRA_TCP="" ; FW_EXTRA_UDP=""
     FW_WAN_IF="" ; FW_LAN_IF="" ; FW_DMZ_IF=""
     FW_FORWARDS=()
@@ -1006,16 +1091,24 @@ module_firewall() {
         fw_ask_forwards
     fi
 
-    # Generation du jeu de regles
-    local tmp_rules
-    tmp_rules=$(mktemp)
+    # Generation du jeu de regles (IPv4/inet, + IPv6 pour le moteur iptables)
+    local tmp_rules tmp6_rules=""
+    tmp_rules=$(new_tmp)
     if [[ "$engine" == "nft" ]]; then
         fw_generate_nft "$mode" "$tmp_rules"
     else
         fw_generate_iptables "$mode" "$tmp_rules"
+        tmp6_rules=$(new_tmp)
+        fw_generate_ip6tables "$mode" "$tmp6_rules"
     fi
     subtitle "Jeu de regles genere ($engine, mode $mode)"
     sed 's/^/    /' "$tmp_rules"
+    if [[ -n "$tmp6_rules" ]]; then
+        say ""
+        subtitle "Socle IPv6 (ip6tables) genere"
+        sed 's/^/    /' "$tmp6_rules"
+        [[ "$mode" == "routeur" ]] && warn "Mode routeur : le FORWARD IPv6 reste permissif (a filtrer separement si vous routez de l'IPv6)."
+    fi
     say ""
     if ! ask_yn "Appliquer ce jeu de regles (rollback automatique sous 60 s sans confirmation) ?" "${CFG_FW_APPLY:-n}"; then
         info "Regles non appliquees. Fichier conserve pour consultation : $tmp_rules"
@@ -1044,7 +1137,7 @@ SYSCTL
     fi
 
     # Application avec anti-verrouillage puis persistance
-    if fw_apply_with_rollback "$engine" "$tmp_rules"; then
+    if fw_apply_with_rollback "$engine" "$tmp_rules" "$tmp6_rules"; then
         if [[ "$engine" == "nft" ]]; then
             if [[ $DRY_RUN -eq 0 ]]; then
                 local nft_existed=0
@@ -1063,12 +1156,18 @@ SYSCTL
                 cp "$tmp_rules" /etc/iptables/rules.v4
                 [[ -z "${BACKED_UP[/etc/iptables/rules.v4]:-}" ]] && manifest_add "newfile|/etc/iptables/rules.v4"
                 ok "Regles persistees dans /etc/iptables/rules.v4"
+                if [[ -n "$tmp6_rules" ]]; then
+                    backup_file /etc/iptables/rules.v6
+                    cp "$tmp6_rules" /etc/iptables/rules.v6
+                    [[ -z "${BACKED_UP[/etc/iptables/rules.v6]:-}" ]] && manifest_add "newfile|/etc/iptables/rules.v6"
+                    ok "Socle IPv6 persiste dans /etc/iptables/rules.v6"
+                fi
             fi
         fi
         mark_done "parefeu"
         journal "Module 3 : pare-feu $engine ($mode) applique et persiste"
     fi
-    rm -f "$tmp_rules"
+    rm -f "$tmp_rules" "$tmp6_rules"
 
     if ask_yn "Generer aussi le guide OPNsense (equivalent appliance) ?" "${CFG_FW_OPNSENSE_GUIDE:-o}"; then
         fw_opnsense_guide
@@ -1081,7 +1180,7 @@ SYSCTL
 #===============================================================================
 
 ids_pedagogie() {
-    cat <<'TXT'
+    teach <<'TXT'
   IDS : sonde qui ECOUTE le trafic (interface en mode promiscuous, TAP ou
         port mirror) et leve des ALERTES sur signatures ou anomalies.
   IPS : le meme moteur place EN COUPURE, qui BLOQUE (drop) le trafic
@@ -1277,7 +1376,7 @@ RULES
 module_ids() {
     title "MODULE 4 : IDS / IPS - detection et prevention d'intrusion"
     ids_pedagogie
-    pause
+    pause_teach
     local c
     c=$(ask_choice "Quel moteur deployer ?" \
         "Suricata (recommande : production, multi-threads, eve.json, threat intel)" \
@@ -1297,7 +1396,7 @@ module_ids() {
 
 module_squid() {
     title "MODULE 5 : Proxy de filtrage sortant (Squid)"
-    cat <<'TXT'
+    teach <<'TXT'
   Pourquoi un proxy sortant ? (architecture "passerelle Internet" ANSSI)
     - point de passage OBLIGE du web sortant : le pare-feu bloque le port
       80/443 direct, seuls les flux via le proxy sortent ;
@@ -1308,7 +1407,7 @@ module_squid() {
   premiere regle http_access qui correspond gagne, et on termine toujours
   par 'http_access deny all' (moindre privilege applique au web).
 TXT
-    pause
+    pause_teach
     ask_yn "Deployer et configurer Squid maintenant ?" "${CFG_SQUID:-o}" || return 0
 
     install_pkgs squid || return 1
@@ -1392,7 +1491,7 @@ TXT
 # REGION 8 : MODULE 6 - REVERSE PROXY (NGINX / HAPROXY)
 #===============================================================================
 
-revproxy_cert() {
+revproxy_selfsigned_cert() {
     # $1 = CN ; genere un certificat auto-signe de lab dans /etc/ssl/defense-reseau/
     local cn="$1" dir="/etc/ssl/defense-reseau"
     CERT_CRT="$dir/$cn.crt"; CERT_KEY="$dir/$cn.key"
@@ -1405,13 +1504,65 @@ revproxy_cert() {
         info "Certificat deja present : $CERT_CRT"
         return 0
     fi
+    # SAN = CN : les navigateurs recents exigent un subjectAltName
     run_cmd "Generation d'un certificat auto-signe (lab) pour $cn" \
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-            -keyout "$CERT_KEY" -out "$CERT_CRT" -subj "/CN=$cn" || return 1
+            -keyout "$CERT_KEY" -out "$CERT_CRT" -subj "/CN=$cn" \
+            -addext "subjectAltName=DNS:$cn" || return 1
     chmod 600 "$CERT_KEY"
     manifest_add "newfile|$CERT_CRT"
     manifest_add "newfile|$CERT_KEY"
     warn "Certificat AUTO-SIGNE (maquette). En production : certificat valide (Let's Encrypt/PKI interne)."
+}
+
+# revproxy_obtain_cert <cn> : definit CERT_CRT / CERT_KEY et CERT_MODE selon la
+# source choisie (certificat existant, Let's Encrypt, ou auto-signe de lab).
+revproxy_obtain_cert() {
+    local cn="$1" src
+    CERT_MODE="selfsigned"
+    if [[ $UNATTENDED -eq 1 ]]; then
+        src="${CFG_RP_CERT_MODE:-selfsigned}"
+    else
+        local ch
+        ch=$(ask_choice "Source du certificat TLS pour $cn ?" \
+            "Certificat existant (PKI interne / deja emis) - RECOMMANDE en production" \
+            "Let's Encrypt via certbot (domaine public + port 80 joignables)" \
+            "Auto-signe (maquette / lab)")
+        case "$ch" in 1) src="existing" ;; 2) src="letsencrypt" ;; *) src="selfsigned" ;; esac
+    fi
+
+    case "$src" in
+        existing)
+            local crt key cmod kmod
+            crt=$(ask_val "Chemin du certificat (fullchain .crt/.pem)" "${CFG_RP_CERT_CRT:-}")
+            key=$(ask_val "Chemin de la cle privee (.key)" "${CFG_RP_CERT_KEY:-}")
+            if [[ $DRY_RUN -eq 1 ]]; then
+                say "${C_CYA}  [SIMULATION]${C_OFF} Utilisation du certificat existant $crt / $key"
+                CERT_CRT="$crt"; CERT_KEY="$key"; CERT_MODE="existing"; return 0
+            fi
+            if [[ ! -s "$crt" || ! -s "$key" ]]; then
+                err "Certificat ou cle introuvable : bascule sur un certificat auto-signe de lab."
+                revproxy_selfsigned_cert "$cn"; return $?
+            fi
+            # La cle correspond-elle au certificat ? (compare les modules, RSA ou EC)
+            cmod=$(openssl x509 -noout -modulus -in "$crt" 2>/dev/null | openssl md5 2>/dev/null)
+            kmod=$(openssl rsa  -noout -modulus -in "$key" 2>/dev/null | openssl md5 2>/dev/null)
+            if [[ -n "$cmod" && -n "$kmod" && "$cmod" != "$kmod" ]]; then
+                warn "La cle privee ne semble PAS correspondre au certificat : verifiez avant mise en service."
+            fi
+            CERT_CRT="$crt"; CERT_KEY="$key"; CERT_MODE="existing"
+            ok "Certificat existant utilise : $crt"
+            ;;
+        letsencrypt)
+            # Certificat temporaire auto-signe pour que la config passe la validation ;
+            # certbot le remplacera ensuite (voir revproxy_nginx).
+            CERT_MODE="letsencrypt"
+            revproxy_selfsigned_cert "$cn"
+            ;;
+        *)
+            revproxy_selfsigned_cert "$cn"
+            ;;
+    esac
 }
 
 revproxy_nginx() {
@@ -1419,7 +1570,7 @@ revproxy_nginx() {
     local name backend
     name=$(ask_val "Nom de domaine servi (server_name)" "${CFG_RP_NAME:-app.exemple.local}")
     backend=$(ask_val "Backend a proteger (URL interne, ex: http://192.168.20.10:8080)" "${CFG_RP_BACKEND:-http://192.168.20.10:8080}")
-    revproxy_cert "$name" || return 1
+    revproxy_obtain_cert "$name" || return 1
 
     write_file "/etc/nginx/sites-available/reverse-proxy-$name.conf" "reverse proxy Nginx ($name)" <<NGINX
 # Reverse proxy - genere par $SCRIPT_NAME
@@ -1475,8 +1626,28 @@ NGINX2
     run_cmd "Rechargement de Nginx" systemctl reload nginx
     run_cmd "Activation au demarrage" systemctl enable nginx
     manifest_add "service|nginx"
+
+    # Let's Encrypt : certbot --nginx obtient un vrai certificat et le substitue a
+    # l'auto-signe temporaire, puis programme le renouvellement automatique (timer).
+    if [[ "${CERT_MODE:-}" == "letsencrypt" && $DRY_RUN -eq 0 ]]; then
+        if install_pkgs certbot python3-certbot-nginx; then
+            local email
+            local -a certbot_args=(--nginx -d "$name" --non-interactive --agree-tos --redirect)
+            email=$(ask_val "E-mail d'enregistrement Let's Encrypt (avis d'expiration, vide pour aucun)" "${CFG_RP_LE_EMAIL:-}")
+            if [[ -n "$email" ]]; then
+                certbot_args+=(--email "$email")
+            else
+                certbot_args+=(--register-unsafely-without-email)
+            fi
+            if run_cmd "Obtention du certificat Let's Encrypt pour $name" certbot "${certbot_args[@]}"; then
+                ok "Certificat Let's Encrypt installe ; renouvellement automatique via le timer certbot."
+            else
+                warn "certbot a echoue (domaine non resolu ou port 80 injoignable ?) : l'auto-signe temporaire reste en place."
+            fi
+        fi
+    fi
     info "Test : curl -k https://$name/ --resolve $name:443:IP_DU_PROXY"
-    journal "Module 6 : reverse proxy Nginx configure ($name -> $backend)"
+    journal "Module 6 : reverse proxy Nginx configure ($name -> $backend, cert=${CERT_MODE:-selfsigned})"
 }
 
 revproxy_haproxy() {
@@ -1484,7 +1655,12 @@ revproxy_haproxy() {
     local name backend pem="/etc/haproxy/certs/reverse.pem"
     name=$(ask_val "Nom de domaine servi" "${CFG_RP_NAME:-app.exemple.local}")
     backend=$(ask_val "Backend (IP:port, ex: 192.168.20.10:8080)" "${CFG_RP_BACKEND_HA:-192.168.20.10:8080}")
-    revproxy_cert "$name" || return 1
+    revproxy_obtain_cert "$name" || return 1
+    if [[ "${CERT_MODE:-}" == "letsencrypt" ]]; then
+        warn "Let's Encrypt automatique n'est cable que pour Nginx : HAProxy utilise ici l'auto-signe temporaire."
+        info "Pour un vrai certificat : 'certbot certonly --standalone -d $name' (HAProxy arrete sur :80), puis"
+        info "  cat /etc/letsencrypt/live/$name/fullchain.pem /etc/letsencrypt/live/$name/privkey.pem > $pem && systemctl reload haproxy"
+    fi
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p /etc/haproxy/certs
         cat "$CERT_CRT" "$CERT_KEY" > "$pem"
@@ -1527,7 +1703,7 @@ HAP
 
 module_revproxy() {
     title "MODULE 6 : Reverse proxy (Nginx / HAProxy)"
-    cat <<'TXT'
+    teach <<'TXT'
   Le reverse proxy est la FACADE unique de vos services web (typiquement en
   DMZ, devant les serveurs applicatifs) :
     - terminaison TLS centralisee (un seul endroit ou gerer certificats et
@@ -1539,7 +1715,7 @@ module_revproxy() {
   NGINX  : simple et polyvalent (serveur web + reverse proxy).
   HAPROXY: specialiste de la repartition de charge et de la haute dispo.
 TXT
-    pause
+    pause_teach
     local c
     c=$(ask_choice "Quel reverse proxy deployer ?" \
         "Nginx (recommande pour debuter : un fichier de site dedie)" \
@@ -1559,7 +1735,7 @@ TXT
 
 module_bastion() {
     title "MODULE 7 : Bastion SSH - securiser les acces administrateur"
-    cat <<'TXT'
+    teach <<'TXT'
   Le bastion est LE point d'entree unique de l'administration : les
   administrateurs s'y connectent, puis rebondissent vers les serveurs
   internes. Interets : une seule porte a defendre et a JOURNALISER, MFA et
@@ -1576,13 +1752,13 @@ module_bastion() {
   cle publique est deja installee, et la configuration est validee
   (sshd -t) avant redemarrage. Votre session SSH actuelle reste ouverte.
 TXT
-    pause
+    pause_teach
     ask_yn "Durcir le service SSH de cette machine en bastion ?" "${CFG_BASTION:-o}" || return 0
 
     local grp adminuser sshport
     grp=$(ask_val "Groupe autorise a se connecter (AllowGroups)" "${CFG_BASTION_GROUP:-adminssh}")
     adminuser=$(ask_val "Utilisateur admin a placer dans ce groupe" "${CFG_BASTION_USER:-${SUDO_USER:-$USER}}")
-    sshport=$(ask_val "Port d'ecoute SSH" "${CFG_BASTION_PORT:-22}")
+    sshport=$(ask_port "Port d'ecoute SSH" "${CFG_BASTION_PORT:-22}")
 
     if ! getent group "$grp" >/dev/null 2>&1; then
         run_cmd "Creation du groupe $grp" groupadd "$grp" && manifest_add "group|$grp"
@@ -1677,6 +1853,9 @@ maxretry = 5
 
 [sshd]
 enabled = true
+# backend systemd : lit le journal (journald). Indispensable sur les distributions
+# recentes (Ubuntu 24.04...) ou /var/log/auth.log n'existe plus par defaut.
+backend = systemd
 port    = $sshport
 F2B
             run_cmd "Redemarrage de fail2ban" systemctl restart fail2ban
@@ -1732,14 +1911,14 @@ GUIDE
 
 module_privileges() {
     title "MODULE 8 : Moindre privilege et defense en profondeur systeme"
-    cat <<'TXT'
+    teach <<'TXT'
   Le moindre privilege au niveau systeme complete les barrieres reseau :
     - sudo GRANULAIRE : deleguer une commande precise, pas 'ALL' ;
     - umask restrictif : les nouveaux fichiers ne sont pas lisibles de tous ;
     - reduire la surface : desactiver les services inutiles ;
     - politique de mots de passe robuste (pwquality, ANSSI : longueur > tout).
 TXT
-    pause
+    pause_teach
 
     # --- 8.1 : audit sudoers ---
     subtitle "8.1 Audit des delegations sudo existantes"
@@ -1760,7 +1939,7 @@ TXT
             run_cmd "Creation du groupe $dgrp" groupadd "$dgrp" && manifest_add "group|$dgrp"
         fi
         local tmpsudo
-        tmpsudo=$(mktemp)
+        tmpsudo=$(new_tmp)
         cat > "$tmpsudo" <<SUDOERS
 # =====================================================================
 #  Delegation sudo GRANULAIRE - $SCRIPT_NAME (moindre privilege)
@@ -2266,7 +2445,7 @@ module_reset() {
     }
 
     local -a pkgs=() groups=() services=()
-    local line typ a b
+    local line typ rest a b
     # Traitement en ordre inverse de creation
     while IFS= read -r line; do
         typ="${line%%|*}"
@@ -2328,13 +2507,14 @@ BANNER
     say "  Version $SCRIPT_VERSION - $(date '+%d/%m/%Y %H:%M')  |  Machine : $(hostname)"
     [[ $DRY_RUN -eq 1 ]]    && warn "MODE SIMULATION (--dry-run) : aucune modification ne sera appliquee."
     [[ $UNATTENDED -eq 1 ]] && info "Mode non-interactif : reponses issues de $CONFIG_FILE et des valeurs par defaut."
+    [[ $PEDAGO -eq 1 ]]     && info "Mode pedagogique actif (--pedago) : explications detaillees affichees."
 }
 
 main_menu() {
     local c
     while true; do
         printf '\n%s\n' "${C_BLD}MENU PRINCIPAL${C_OFF}  ${C_DIM}(defense en profondeur : suivez l'ordre 1 -> 9)${C_OFF}"
-        printf '   1) %s Concepts : moyens de defense et choix des equipements\n' "$(done_mark concepts)"
+        printf '   1) %s Assistant de choix des equipements (architecture)\n' "$(done_mark concepts)"
         printf '   2) %s Zero Trust (NIST SP 800-207) : evaluation + plan d'"'"'action applicable\n' "$(done_mark zerotrust)"
         printf '   3) %s Pare-feu a zones avec DMZ (nftables/iptables + guide OPNsense)\n' "$(done_mark parefeu)"
         printf '   4) %s IDS/IPS (Snort / Suricata) : regles, tuning, threat intel\n' "$(done_mark ids)"
@@ -2410,6 +2590,9 @@ Options :
   --config FICHIER       Fichier de configuration (voir config.sample.conf).
   --reset                Lance directement la reinitialisation ('$RESET_KEYWORD').
   --no-color             Desactive les couleurs.
+  --pedago               Affiche les explications pedagogiques (methode, schemas,
+                         referentiels). Par defaut l'outil est operationnel (sans
+                         volet pedagogique).
   --help, -h             Cette aide.
 
 Modules : concepts, zerotrust, pare-feu/DMZ (+guide OPNsense), IDS/IPS
@@ -2426,6 +2609,7 @@ main() {
             --config)      shift; CONFIG_FILE="${1:-}" ;;
             --reset)       DO_RESET=1 ;;
             --no-color)    NO_COLOR=1 ;;
+            --pedago)      PEDAGO=1 ;;
             --help|-h)     usage; exit 0 ;;
             *) printf 'Option inconnue : %s\n' "$1" >&2; usage; exit 1 ;;
         esac
